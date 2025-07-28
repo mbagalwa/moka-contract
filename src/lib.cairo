@@ -4,31 +4,28 @@ use crate::structures::CONTRACT_STRUCT::{
     PROVIDER_PAYMENT, PROVIDER_PAYMENT_STATUS, TRANSACTION, TRANS_STATUS,
 };
 
-
 #[starknet::interface]
 pub trait CONTRACT_TRAIT<TContractState> {
+    // Transaction
     fn init_transaction(ref self: TContractState, transaction: TRANSACTION);
-    fn transaction_status(ref self: TContractState, trans_id: felt252, status: TRANS_STATUS);
+    fn transaction_status(ref self: TContractState, trans_id: felt252, payload: TRANS_STATUS);
     fn get_transaction_status(self: @TContractState, trans_id: felt252) -> Array<TRANS_STATUS>;
-
     fn get_current_status(self: @TContractState, trans_id: felt252) -> TRANS_STATUS;
 
-
     // Provider
-
     fn init_provider_payment(
         ref self: TContractState, trans_id: felt252, payload: PROVIDER_PAYMENT,
     );
     fn provider_payment_status(
-        ref self: TContractState, trans_id: felt252, status: PROVIDER_PAYMENT_STATUS,
+        ref self: TContractState, trans_id: felt252, payload: PROVIDER_PAYMENT_STATUS,
     );
-
     fn get_provider_payment_status(
         self: @TContractState, trans_id: felt252,
-    ) -> Array<PROVIDER_PAYMENT_STATUS>;
-    // fn provider_payment_current_status(
-//     self: @TContractState, trans_id: felt252,
-// ) -> PROVIDER_PAYMENT_STATUS;
+    ) -> Option<Array<PROVIDER_PAYMENT_STATUS>>;
+
+    fn provider_payment_current_status(
+        self: @TContractState, trans_id: felt252,
+    ) -> PROVIDER_PAYMENT_STATUS;
 }
 
 
@@ -42,10 +39,15 @@ pub mod MokaContract {
     use starknet::{ContractAddress, get_caller_address};
     use crate::PROVIDER_PAYMENT;
     use crate::structures::CONTRACT_STRUCT::{PROVIDER_PAYMENT_STATUS, TRANSACTION, TRANS_STATUS};
+    use crate::structures::CONTRACT_STRUCT_EVENT::{
+        InitProviderPayment, InitTransaction, ProviderPaymentStatus, TransactionStatus,
+    };
     use crate::utils::ERROR_MESSAGE;
 
     #[storage]
     struct Storage {
+        name: felt252,
+        description: ByteArray,
         supervisor: ContractAddress,
         transactions: Map<felt252, TRANSACTION>,
         transaction_status: Map<felt252, Vec<TRANS_STATUS>>,
@@ -53,24 +55,44 @@ pub mod MokaContract {
         provider_payment_status: Map<felt252, Vec<PROVIDER_PAYMENT_STATUS>>,
     }
 
+    // /* ------------------------------- Constructor ------------------------------ */
+    #[constructor]
+    fn constructor(ref self: ContractState) {
+        self.name.write('Moka');
+        self.description.write("Moka Contract v1.0");
+        self.supervisor.write(get_caller_address());
+    }
+
+
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    pub enum Event {
+        InitTransaction: InitTransaction,
+        TransactionStatus: TransactionStatus,
+        InitProviderPayment: InitProviderPayment,
+        ProviderPaymentStatus: ProviderPaymentStatus,
+    }
+
+
     // /* ------------------------- Contract implementation ------------------------ */
     #[abi(embed_v0)]
     impl MokaContractImpl of super::CONTRACT_TRAIT<ContractState> {
         //a. init transaction
         fn init_transaction(ref self: ContractState, transaction: TRANSACTION) {
-            //1. Verify Supervisor
+            //1. Verify Supervisor & check if transaction exist
             assert(self.is_supervisor(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED);
-
-            //2. check if transaction exist
             assert(
                 !self.transaction_exist(transaction.id), ERROR_MESSAGE::TRANSACTION_ALREADY_EXISTS,
             );
 
-            //3. init transaction
+            //2. init transaction
             let trans_id = transaction.id;
+            let issuer = transaction.issuer;
+            let executor = transaction.executor;
+            let amount = transaction.amount;
             self.transactions.entry(trans_id).write(transaction);
 
-            //3. init status
+            //2. init status
             let init_status = TRANS_STATUS {
                 id: 1,
                 author_type: 1,
@@ -80,21 +102,28 @@ pub mod MokaContract {
                 comment: "Transaction created",
             };
             self.add_transaction_status(trans_id, init_status);
+
+            //4. Make event
+            self.emit(InitTransaction { id: trans_id, issuer, executor, amount });
         }
 
         //b. update transaction status
-        fn transaction_status(ref self: ContractState, trans_id: felt252, status: TRANS_STATUS) {
-            //1. Verify Supervisor
+        fn transaction_status(ref self: ContractState, trans_id: felt252, payload: TRANS_STATUS) {
+            //1. Verify Supervisor && check if transaction exist
             assert(self.is_supervisor(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED);
-
-            //2. check if transaction exist
             assert(
                 self.transaction_exist_on_status(trans_id),
                 ERROR_MESSAGE::TRANSACTION_STATUS_NOT_FOUND,
             );
 
-            //3. add status
-            self.add_transaction_status(trans_id, status);
+            //2. add status
+            let author_type = payload.author_type;
+            let status = payload.status;
+            let action = payload.action;
+            self.add_transaction_status(trans_id, payload);
+
+            //4. Make event
+            self.emit(TransactionStatus { id: trans_id, author_type, status, action });
         }
 
         //c. get transaction status
@@ -138,50 +167,71 @@ pub mod MokaContract {
         fn init_provider_payment(
             ref self: ContractState, trans_id: felt252, payload: PROVIDER_PAYMENT,
         ) {
-            //1. Verify Supervisor
+            //1. Verify Supervisor & check if transaction exist
             assert(self.is_supervisor(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED);
-
-            //2. check if transaction exist
             assert(
                 !self.provider_transaction_exist(trans_id),
                 ERROR_MESSAGE::TRANSACTION_ALREADY_EXISTS,
             );
 
-            //3. init transaction
-            let payload_timestamp = payload.timestamp;
+            //2. init transaction
+            let provider_id = payload.provider_id;
+            let timestamp = payload.timestamp;
+            let amount = payload.amount;
+            let region = payload.region;
+            let to = payload.to;
+
             self.provider_payment.entry(trans_id).write(payload);
 
-            //4. init status
+            //3. init status
             let init_status = PROVIDER_PAYMENT_STATUS {
+                trans_id: trans_id,
+                action: 'init payment',
                 status: 1,
                 comment: "Payment is pending observation",
-                action: 'init payment',
-                timestamp: payload_timestamp,
-                observation: false,
+                timestamp,
             };
             self.provider_payment_status.entry(trans_id).push(init_status);
+
+            //4. Make event
+            self.emit(InitProviderPayment { trans_id, provider_id, amount, region, to });
         }
 
         //a. update provider payment status
         fn provider_payment_status(
-            ref self: ContractState, trans_id: felt252, status: PROVIDER_PAYMENT_STATUS,
+            ref self: ContractState, trans_id: felt252, payload: PROVIDER_PAYMENT_STATUS,
         ) {
-            // 1. Verify Supervisor
+            // 1. Verify Supervisor & check if transaction exist
             assert(self.is_supervisor(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED);
-
-            // 2. check if transaction exist
             assert(self.provider_transaction_exist(trans_id), ERROR_MESSAGE::TRANSACTION_NOT_FOUND);
 
-            // 3. update status
-            self.provider_payment_status.entry(trans_id).push(status);
+            // 2. update status
+            let payload_for_storage = payload.clone();
+            self.provider_payment_status.entry(trans_id).push(payload);
+
+            // 3. Make event
+            let action = payload_for_storage.action;
+            let status = payload_for_storage.status;
+            let comment = payload_for_storage.comment;
+            self.emit(ProviderPaymentStatus { action, status, comment });
         }
 
         //b. get provider payment status
-        // fn get_provider_payment_status(
-        //     self: @ContractState, trans_id: felt252,
-        // ) -> Option<Array<PROVIDER_PAYMENT_STATUS>> {
+        fn get_provider_payment_status(
+            self: @ContractState, trans_id: felt252,
+        ) -> Option<Array<PROVIDER_PAYMENT_STATUS>> {
+            let _status = self.provider_payment_status.entry(trans_id);
+            if (_status.len() == 0) {
+                return Option::None;
+            }
 
-        // }
+            let mut status = array![];
+            for i in 0.._status.len() {
+                status.append(_status.at(i).read());
+            }
+
+            return Option::Some(status);
+        }
 
         //c.
         fn provider_payment_current_status(

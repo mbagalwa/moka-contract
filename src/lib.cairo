@@ -1,11 +1,14 @@
 pub mod structures;
 pub mod utils;
+use starknet::ContractAddress;
 use crate::structures::CONTRACT_STRUCT::{
     PROVIDER_PAYMENT, PROVIDER_PAYMENT_STATUS, TRANSACTION, TRANS_STATUS,
 };
 
 #[starknet::interface]
 pub trait CONTRACT_TRAIT<TContractState> {
+    fn get_owner(self: @TContractState) -> ContractAddress;
+
     // Transaction
     fn init_transaction(ref self: TContractState, transaction: TRANSACTION);
     fn transaction_status(ref self: TContractState, trans_id: felt252, payload: TRANS_STATUS);
@@ -22,7 +25,6 @@ pub trait CONTRACT_TRAIT<TContractState> {
     fn get_provider_payment_status(
         self: @TContractState, trans_id: felt252,
     ) -> Option<Array<PROVIDER_PAYMENT_STATUS>>;
-
     fn provider_payment_current_status(
         self: @TContractState, trans_id: felt252,
     ) -> PROVIDER_PAYMENT_STATUS;
@@ -57,10 +59,10 @@ pub mod MokaContract {
 
     // /* ------------------------------- Constructor ------------------------------ */
     #[constructor]
-    fn constructor(ref self: ContractState) {
+    fn constructor(ref self: ContractState, supervisor: ContractAddress) {
         self.name.write('Moka');
         self.description.write("Moka Contract v1.0");
-        self.supervisor.write(get_caller_address());
+        self.supervisor.write(supervisor);
     }
 
 
@@ -77,10 +79,17 @@ pub mod MokaContract {
     // /* ------------------------- Contract implementation ------------------------ */
     #[abi(embed_v0)]
     impl MokaContractImpl of super::CONTRACT_TRAIT<ContractState> {
+        //a. get owner
+        fn get_owner(self: @ContractState) -> ContractAddress {
+            return self.supervisor.read();
+        }
+
         //a. init transaction
         fn init_transaction(ref self: ContractState, transaction: TRANSACTION) {
             //1. Verify Supervisor & check if transaction exist
-            assert(self.is_supervisor(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED);
+            assert(
+                self.get_owner() == get_caller_address(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED,
+            );
             assert(
                 !self.transaction_exist(transaction.id), ERROR_MESSAGE::TRANSACTION_ALREADY_EXISTS,
             );
@@ -110,7 +119,9 @@ pub mod MokaContract {
         //b. update transaction status
         fn transaction_status(ref self: ContractState, trans_id: felt252, payload: TRANS_STATUS) {
             //1. Verify Supervisor && check if transaction exist
-            assert(self.is_supervisor(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED);
+            assert(
+                self.get_owner() == get_caller_address(), ERROR_MESSAGE::SUPPLIER_NOT_AUTHORIZED,
+            );
             assert(
                 self.transaction_exist_on_status(trans_id),
                 ERROR_MESSAGE::TRANSACTION_STATUS_NOT_FOUND,
